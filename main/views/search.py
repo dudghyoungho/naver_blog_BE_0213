@@ -42,6 +42,7 @@ class BlogPostSearchView(APIView):
     permission_classes = [IsAuthenticatedOrReadOnly]
 
     @swagger_auto_schema(
+        operation_summary = "특정 블로그 게시물 검색",
         operation_description="특정 블로그 내에서 게시물을 검색합니다.",
         manual_parameters=[
             openapi.Parameter('urlname', openapi.IN_QUERY, description="블로그 식별자 (사용자 프로필 URL 식별자)",
@@ -123,6 +124,7 @@ class GlobalBlogSearchView(APIView):
     permission_classes = [IsAuthenticatedOrReadOnly]
 
     @swagger_auto_schema(
+        operation_summary="블로그명 검색 (전체)",
         operation_description="블로그명을 검색하여 관련 블로그 정보를 반환합니다.",
         manual_parameters=[
             openapi.Parameter('q', openapi.IN_QUERY, description="검색할 블로그명", type=openapi.TYPE_STRING, required=True),
@@ -169,6 +171,7 @@ class GlobalNickAndIdSearchView(APIView):
     permission_classes = [IsAuthenticatedOrReadOnly]
 
     @swagger_auto_schema(
+        operation_summary="사용자명, 블로그 url 검색(전체)",
         operation_description="사용자명(username) 또는 블로그 ID(urlname)을 검색합니다.",
         manual_parameters=[
             openapi.Parameter('q', openapi.IN_QUERY, description="검색할 사용자명 또는 블로그 ID", type=openapi.TYPE_STRING, required=True),
@@ -237,6 +240,7 @@ class GlobalPostSearchView(APIView):
     permission_classes = [IsAuthenticatedOrReadOnly]
 
     @swagger_auto_schema(
+        operation_summary="블로그 글 검색 (전체)",
         operation_description="전체 블로그에서 게시글을 검색합니다.",
         manual_parameters=[
             openapi.Parameter('q', openapi.IN_QUERY, description="검색할 키워드", type=openapi.TYPE_STRING,

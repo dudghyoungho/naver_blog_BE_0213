@@ -4,6 +4,10 @@ from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
 from rest_framework.generics import DestroyAPIView
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.permissions import IsAuthenticatedOrReadOnly
+
 from django.shortcuts import get_object_or_404
 from ..models.neighbor import Neighbor
 from ..models.profile import Profile
@@ -144,19 +148,10 @@ class NeighborRequestListView(ListAPIView):
 
 class NeighborAcceptView(APIView):
     """
-    ✅ 서로이웃 요청 수락 (PUT /api/neighbors/accept/{neighbor_id}/)
+    ✅ 서로이웃 요청 수락 (PUT /api/neighbors/accept/{neighbor_urlname}/)
     """
     permission_classes = [IsAuthenticated]
 
-    @swagger_auto_schema(
-        operation_summary="서로이웃 요청 수락",
-        operation_description="받은 서로이웃 신청을 수락합니다.",
-        responses={
-            200: openapi.Response(description="서로이웃 요청 수락됨"),
-            400: openapi.Response(description="이미 수락된 요청"),
-            404: openapi.Response(description="요청을 찾을 수 없음"),
-        }
-    )
     def put(self, request, from_urlname):
         """
         ✅ 서로이웃 요청을 보낸 사용자의 URL 이름 (`from_urlname`)을 기반으로 수락
@@ -164,18 +159,32 @@ class NeighborAcceptView(APIView):
         to_user = request.user  # 현재 로그인한 사용자
         from_user_profile = get_object_or_404(Profile, urlname=from_urlname)
         from_user = from_user_profile.user
+        to_user_profile, _ = Profile.objects.get_or_create(user=to_user)
 
-        # ✅ 서로이웃 요청 찾기
-        neighbor_request = get_object_or_404(
-            Neighbor, from_user=from_user, to_user=to_user, status="pending"
-        )
-
-        if neighbor_request.status == "accepted":
+        # ✅ 서로이웃 관계가 이미 존재하는 경우
+        if Neighbor.objects.filter(
+            (Q(from_user=from_user, to_user=to_user) | Q(from_user=to_user, to_user=from_user)),
+            status="accepted"
+        ).exists():
             return Response({"message": "이미 서로이웃 상태입니다."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # ✅ 서로이웃 요청 수락
-        neighbor_request.status = "accepted"
-        neighbor_request.save()
+        # ✅ 서로이웃 요청 찾기 (A → B)
+        neighbor_requests = Neighbor.objects.filter(from_user=from_user, to_user=to_user, status="pending")
+
+        # ✅ 반대 방향의 서로이웃 요청 찾기 (B → A)
+        reverse_neighbor_requests = Neighbor.objects.filter(from_user=to_user, to_user=from_user, status="pending")
+
+        # ✅ 둘 다 없으면 에러
+        if not neighbor_requests.exists() and not reverse_neighbor_requests.exists():
+            return Response({"message": "서로이웃 요청이 존재하지 않습니다."}, status=status.HTTP_404_NOT_FOUND)
+
+        # ✅ 모든 `pending` 요청을 `accepted`로 변경 (A → B & B → A)
+        neighbor_requests.update(status="accepted")
+        reverse_neighbor_requests.update(status="accepted")
+
+        # ✅ Profile의 `neighbors`에도 서로 추가 (양방향)
+        from_user_profile.neighbors.add(to_user_profile)
+        to_user_profile.neighbors.add(from_user_profile)
 
         return Response({"message": "서로이웃 요청이 수락되었습니다."}, status=status.HTTP_200_OK)
 
@@ -350,45 +359,12 @@ class MyNeighborListView(ListAPIView):
         return Response(response_data, status=status.HTTP_200_OK)
 
 
-class MyNeighborDeleteView(DestroyAPIView):
+class MyNeighborDeleteView(APIView):
     """
     ✅ 로그인한 사용자의 특정 서로이웃 삭제
     """
     permission_classes = [IsAuthenticated]
 
-    @swagger_auto_schema(
-        operation_summary="내 서로이웃 삭제",
-        operation_description="로그인한 사용자가 특정 서로이웃을 삭제합니다.",
-        manual_parameters=[
-            openapi.Parameter(
-                "neighbor_urlname",
-                openapi.IN_PATH,
-                description="삭제할 서로이웃의 URL 이름",
-                type=openapi.TYPE_STRING,
-                required=True
-            )
-        ],
-        responses={
-            200: openapi.Response(
-                description="서로이웃 삭제 성공",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        "message": openapi.Schema(type=openapi.TYPE_STRING, description="삭제 완료 메시지")
-                    }
-                )
-            ),
-            404: openapi.Response(
-                description="서로이웃 관계가 존재하지 않음",
-                schema=openapi.Schema(
-                    type=openapi.TYPE_OBJECT,
-                    properties={
-                        "message": openapi.Schema(type=openapi.TYPE_STRING, description="에러 메시지")
-                    }
-                )
-            ),
-        }
-    )
     def delete(self, request, neighbor_urlname):
         """
         ✅ 로그인한 사용자의 서로이웃 관계를 삭제합니다.
@@ -396,17 +372,46 @@ class MyNeighborDeleteView(DestroyAPIView):
         profile = get_object_or_404(Profile, user=request.user)
         neighbor_profile = get_object_or_404(Profile, urlname=neighbor_urlname)
 
-        # ✅ 서로이웃 관계 확인
-        neighbor_relation = Neighbor.objects.filter(
+        # ✅ 서로이웃 관계 확인 (모든 해당 관계 삭제)
+        neighbor_relations = Neighbor.objects.filter(
             Q(from_user=request.user, to_user=neighbor_profile.user) |
             Q(from_user=neighbor_profile.user, to_user=request.user),
             status="accepted"
-        ).first()
+        )
 
-        if not neighbor_relation:
+        if not neighbor_relations.exists():
             return Response({"message": "서로이웃 관계가 존재하지 않습니다."}, status=status.HTTP_404_NOT_FOUND)
 
         # ✅ 서로이웃 관계 삭제
-        neighbor_relation.delete()
+        neighbor_relations.delete()
+
+        # ✅ Profile의 neighbors에서도 제거
+        profile.neighbors.remove(neighbor_profile)
+        neighbor_profile.neighbors.remove(profile)
 
         return Response({"message": "서로이웃 관계가 삭제되었습니다."}, status=status.HTTP_200_OK)
+
+
+class NeighborNumberView(APIView):
+    """
+    특정 사용자의 서로이웃 수를 반환하는 API (자기 자신 조회 허용)
+    """
+    permission_classes = [IsAuthenticatedOrReadOnly]  # 🔹 로그인 안 해도 조회 가능 (본인 확인 시 필요)
+
+    def get(self, request, urlname, *args, **kwargs):
+        """
+        GET 요청을 통해 특정 사용자의 서로이웃 수를 반환
+        """
+        profile = get_object_or_404(Profile, urlname=urlname)
+
+        # ✅ 현재 로그인한 사용자 확인
+        user = request.user if request.user.is_authenticated else None
+        is_own_profile = user and profile.user == user  # 🔥 본인이 조회하는 경우 확인
+
+        # 🔹 비공개 설정이지만 본인이라면 조회 가능하도록 처리
+        if not profile.neighbor_visibility and not is_own_profile:
+            raise PermissionDenied("이 사용자는 서로이웃 정보를 공개하지 않습니다.")
+
+        neighbor_count = profile.neighbors.count()
+
+        return Response({"urlname": urlname, "neighbor_count": neighbor_count})

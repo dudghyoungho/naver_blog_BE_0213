@@ -1,7 +1,8 @@
 from rest_framework.generics import CreateAPIView, ListAPIView, RetrieveAPIView, UpdateAPIView, DestroyAPIView
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework import status
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
@@ -16,6 +17,7 @@ from rest_framework.exceptions import MethodNotAllowed, ValidationError
 from django.shortcuts import get_object_or_404
 from django.utils.timezone import now, timedelta
 from pickle import FALSE
+
 
 def to_boolean(value):
     """
@@ -453,10 +455,10 @@ class PostManageView(UpdateAPIView, DestroyAPIView):
 
         # ✅ `is_complete=True`인 게시물은 `False`로 변경할 수 없음
         if "is_complete" in request.data:
-            new_is_complete = to_boolean(request.data["is_complete"])  # 🔥 Boolean 변환 적용
+            new_is_complete = request.data["is_complete"] in [True, "true", "True", 1, "1"]
             if instance.is_complete and not new_is_complete:
                 return Response({"error": "작성 완료된 게시물은 다시 임시 저장 상태로 변경할 수 없습니다."}, status=400)
-            instance.is_complete = new_is_complete  # ✅ Boolean 값 저장)
+            instance.is_complete = new_is_complete  # ✅ Boolean 값 저장
 
         # ✅ visibility 검증도 serializer에서 자동으로 처리됨 → 별도 검증 삭제
         instance.visibility = request.data.get('visibility', instance.visibility)
@@ -580,6 +582,7 @@ class PostManageView(UpdateAPIView, DestroyAPIView):
     )
     def delete(self, request, *args, **kwargs):
         instance = self.get_object()
+        folder_path = None
 
         # ✅ 폴더 경로 저장 (main/media/카테고리/제목)
         if instance.images.exists():
@@ -643,3 +646,143 @@ class DraftPostDetailView(RetrieveAPIView):
         요청한 사용자의 특정 임시 저장된 게시물만 반환
         """
         return Post.objects.filter(author=self.request.user, is_complete=False)
+
+
+class PostMyCurrentView(ListAPIView):
+    """
+    로그인된 유저가 작성한 최신 5개 게시물 목록을 조회하는 API
+    ✅ 로그인된 유저가 작성한 게시물 중 is_complete=True인 게시물만 조회
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = PostSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        # ✅ is_complete=True 조건 추가
+        return Post.objects.filter(author=user, is_complete=True).order_by('-created_at')[:5]
+
+    @swagger_auto_schema(
+        operation_summary="내가 작성한 최근 5개 게시물 조회",
+        operation_description="로그인된 유저가 작성한 게시물 중 is_complete=True인 상태에서 최근 5개만 반환합니다.",
+        responses={200: PostSerializer(many=True)}
+    )
+    def get(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+class PostPublicCurrentView(ListAPIView):
+    """
+    특정 사용자의 최신 5개 게시물을 조회하는 API (서로이웃 여부 고려)
+    """
+    permission_classes = []
+    serializer_class = PostSerializer
+
+    def get_queryset(self):
+        """
+        ✅ 특정 사용자의 블로그 게시물 중 서로이웃 여부에 따라 'mutual' 공개 포함 여부 결정
+        """
+        urlname = self.kwargs.get("urlname")  # 조회 대상 블로그 (사용자) ID
+        viewer = self.request.user  # 현재 API를 호출하는 사용자
+
+        # ✅ 조회 대상 블로그 주인 찾기 (Profile → User)
+        profile = get_object_or_404(Profile, urlname=urlname)
+        blog_owner = profile.user
+
+        # ✅ 본인이 자신의 블로그를 조회하는 경우 모든 게시물 조회
+        if viewer == blog_owner:
+            return Post.objects.filter(author=blog_owner, is_complete=True).order_by("-created_at")[:5]
+
+        # ✅ 서로이웃 여부 확인
+        is_mutual = Neighbor.objects.filter(
+            (Q(from_user=viewer, to_user=blog_owner) | Q(from_user=blog_owner, to_user=viewer)),
+            status="accepted"
+        ).exists()
+
+        # ✅ 공개 범위 조건 설정
+        if is_mutual:
+            visibility_filter = Q(visibility__in=["everyone", "mutual"])
+        else:
+            visibility_filter = Q(visibility="everyone")
+
+        # ✅ 필터 적용하여 게시물 가져오기 (최근 5개)
+        return Post.objects.filter(
+            visibility_filter,
+            author=blog_owner,
+            is_complete=True
+        ).order_by("-created_at")[:5]
+
+    @swagger_auto_schema(
+        operation_summary="타인의 블로그에서 최신 5개 게시물 조회",
+        operation_description="특정 사용자의 블로그에서 최근 5개의 게시물을 가져옵니다. "
+                              "서로이웃일 경우 'mutual'까지 포함하고, 아니라면 'everyone' 공개 글만 반환합니다.",
+        responses={200: PostSerializer(many=True)}
+    )
+    def get(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class PostCountView(APIView):
+    """
+    특정 사용자의 게시물 개수를 반환하는 API
+    ✅ 본인이 조회하는 경우: 임시저장 제외 모든 글 개수
+    ✅ 타인이 조회하는 경우:
+        - 서로이웃이면 '전체 공개 + 서로이웃 공개' 게시물 개수
+        - 서로이웃이 아니면 '전체 공개' 게시물 개수
+    ✅ 로그인하지 않은 사용자가 조회하는 경우:
+        - 전체 공개(`everyone`) 게시물 개수만 반환
+    """
+    permission_classes = [AllowAny]  # 인증 없이 접근 가능 (서로이웃 여부에 따라 결과 달라짐)
+    @swagger_auto_schema(
+        operation_summary="사용자의 글 개수 조회",
+        operation_description="특정 사용자의 블로그에 작성된 글의 개수를 가져옵니다. "
+                              "로그인한 본인이 자신의 블로그를 조회하는 경우, 서로이웃이 조회하는 경우, 서로이웃이 아닌 사용자가 조회하는 경우 모두 고려하여 반영.",
+
+    )
+
+
+    def get(self, request, urlname, *args, **kwargs):
+        """
+        GET 요청을 통해 특정 사용자의 게시물 개수 반환
+        """
+        profile = get_object_or_404(Profile, urlname=urlname)
+        blog_owner = profile.user
+        current_user = request.user if request.user.is_authenticated else None
+
+        # ✅ 로그인하지 않은 사용자가 조회하는 경우 → 전체 공개 게시물만 세서 반환
+        if not current_user:
+            post_count = Post.objects.filter(
+                author=blog_owner, is_complete=True, visibility="everyone"
+            ).count()
+            return Response({"urlname": urlname, "post_count": post_count})
+
+        # ✅ 본인이 자신의 블로그를 조회하는 경우 → 모든 작성 완료된 게시물 개수 반환
+        if current_user == blog_owner:
+            post_count = Post.objects.filter(author=blog_owner, is_complete=True).count()
+            return Response({"urlname": urlname, "post_count": post_count})
+
+        # ✅ 서로이웃 관계 확인
+        is_neighbor = Neighbor.objects.filter(
+            (Q(from_user=current_user, to_user=blog_owner) |
+             Q(from_user=blog_owner, to_user=current_user)),
+            status="accepted"
+        ).exists()
+
+        # ✅ 서로이웃이면 '전체 공개 + 서로이웃 공개' 게시물 개수 반환
+        if is_neighbor:
+            post_count = Post.objects.filter(
+                author=blog_owner,
+                is_complete=True,
+                visibility__in=["everyone", "mutual"]
+            ).count()
+        else:
+            # ✅ 서로이웃이 아니면 '전체 공개' 게시물 개수만 반환
+            post_count = Post.objects.filter(
+                author=blog_owner,
+                is_complete=True,
+                visibility="everyone"
+            ).count()
+
+        return Response({"urlname": urlname, "post_count": post_count})
