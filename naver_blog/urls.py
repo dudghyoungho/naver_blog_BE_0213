@@ -21,6 +21,7 @@ from django.conf.urls.static import static
 from main.views.signup import SignupView
 from main.views.login import LoginView
 from main.views.logout import LogoutView
+from main.views.account import PasswordUpdateView
 from main.views.profile import ProfileDetailView, ProfilePublicView, ProfileUrlnameUpdateView
 from main.views.post import PostDetailView,PostMyView,PostMyDetailView,PostMutualView,PostManageView,PostListView,PostCreateView,DraftPostListView,DraftPostDetailView, PostMyCurrentView, PostPublicCurrentView, PostCountView
 from main.views.comment import CommentListView, CommentDetailView
@@ -52,6 +53,8 @@ urlpatterns = [
     # ✅ 로그인 및 로그아웃 API
     path('login/', LoginView.as_view(), name='login'),
     path('logout/', LogoutView.as_view(), name='logout'),
+    path('password/update/', PasswordUpdateView.as_view(), name='password-update'),
+
 
     # ✅ 내 프로필 관련 API
     path('profile/me/', ProfileDetailView.as_view(), name='profile-me'),  # 내 프로필 조회, 수정, 삭제
